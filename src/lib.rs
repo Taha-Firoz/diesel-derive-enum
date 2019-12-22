@@ -2,27 +2,31 @@
 
 extern crate heck;
 extern crate proc_macro;
+extern crate proc_macro2;
 #[macro_use]
 extern crate quote;
 extern crate syn;
 
 use heck::SnakeCase;
 use proc_macro::TokenStream;
-use quote::Tokens;
+use proc_macro2::Span;
+use quote::ToTokens;
+
 use syn::*;
+use syn::punctuated::Punctuated;
 
 #[proc_macro_derive(DbEnum, attributes(PgType, DieselType, db_rename))]
 pub fn derive(input: TokenStream) -> TokenStream {
     let input = input.to_string();
-    let ast = syn::parse_derive_input(&input).expect("Failed to parse item");
+    let ast = syn::parse_macro_input!(input as DeriveInput);
     let db_type =
-        type_from_attrs(&ast.attrs, "PgType").unwrap_or(ast.ident.as_ref().to_snake_case());
+        type_from_attrs(&ast.attrs, "PgType").unwrap_or(ast.ident.to_string().to_snake_case());
     let diesel_mapping = type_from_attrs(&ast.attrs, "DieselType")
-        .unwrap_or(format!("{}Mapping", ast.ident.as_ref()));
-    let diesel_mapping = Ident::new(diesel_mapping);
+        .unwrap_or(format!("{}Mapping", ast.ident));
+    let diesel_mapping = Ident::new(&diesel_mapping, proc_macro2::Span::call_site());
 
-    let quoted = if let Body::Enum(ref variants) = ast.body {
-        generate_derive_enum_impls(&db_type, &diesel_mapping, &ast.ident, variants)
+    let quoted = if let Data::Enum(ref dataenum) = ast.data {
+        generate_derive_enum_impls(&db_type, &diesel_mapping, &ast.ident, &dataenum.variants)
     } else {
         panic!("#derive(DbEnum) can only be applied to enums")
     };
@@ -32,9 +36,16 @@ pub fn derive(input: TokenStream) -> TokenStream {
 
 fn type_from_attrs(attrs: &[Attribute], attrname: &str) -> Option<String> {
     for attr in attrs {
-        if let MetaItem::NameValue(ref key, Lit::Str(ref type_, _)) = attr.value {
-            if key == attrname {
-                return Some(type_.clone());
+        let meta = attr.parse_meta().expect("Failed to parse attribute");
+        if let Meta::NameValue(nv) = meta {
+            if let Some(id) = nv.path.get_ident() {
+                if id.to_string() == attrname {
+                    if let Lit::Str(s) = nv.lit {
+                        return Some(s.value())
+                    } else {
+                        panic!("Not a string literal", nv.lit)
+                    }
+                }
             }
         }
     }
@@ -45,9 +56,9 @@ fn generate_derive_enum_impls(
     db_type: &str,
     diesel_mapping: &Ident,
     enum_ty: &Ident,
-    variants: &[Variant],
+    variants: &Punctuated<Variant, Comma>,
 ) -> Tokens {
-    let modname = Ident::new(format!("db_enum_impl_{}", enum_ty.as_ref()));
+    let modname = Ident::new(format!("db_enum_impl_{}", enum_ty.to_string()), Span::call_site());
     let variant_ids: Vec<Tokens> = variants
         .iter()
         .map(|variant| {
